@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  nginx-builder:
+    build:
+      context: .
+      dockerfile: Dockerfile.build
+    container_name: nginx-builder
+    environment:
+      - BUILD_JOBS=1
+      - CONTAINER_TEST=1
+    mem_limit: 8g
+    cpus: 1.0
+    volumes:
+      - ./nginx-production-tpe-v22.sh:/root/build.sh:ro
+      - build-output:/root/nginx-build
+      - ./container-compose-output.txt:/root/build.log
+    command: bash /root/build.sh
+    stdin_open: false
+    tty: false
+
+volumes:
+  build-output:

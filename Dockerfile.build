@@ -1,0 +1,33 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    git \
+    curl \
+    wget \
+    autoconf \
+    automake \
+    libtool \
+    pkg-config \
+    libyajl-dev \
+    libmaxminddb-dev \
+    doxygen \
+    ca-certificates \
+    perl \
+    autoconf-archive \
+    libpcre2-dev \
+    libfuzzy-dev \
+    liblua5.3-dev \
+    libcurl4-gnutls-dev \
+    libxml2-dev \
+    libjemalloc-dev \
+    libgd-dev \
+    cmake \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /root
+
+# Script will be mounted at runtime
+CMD ["bash", "/root/build.sh"]

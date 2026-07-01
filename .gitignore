@@ -1,0 +1,21 @@
+# Build directories
+nginx-build/
+build/
+*.o
+*.a
+*.so
+
+# Logs and output
+*.log
+container-*.txt
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Dependencies (if any)
+node_modules/
