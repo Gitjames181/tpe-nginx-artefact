@@ -271,7 +271,6 @@ EOF
 # Allow trusted IP before other rules
 SecRule REMOTE_ADDR "@ipMatch 203.0.113.1" "id:1000002,phase:1,pass,nolog,ctl:ruleEngine=Off"
 EOF
-
   echo -e "\nInclude $LINK_DIR/custom/ip-whitelist.conf\nInclude $LINK_DIR/custom/ip-blacklist.conf" >> "$MODSEC_CONF"
 
   msg "CRS installed with paranoia level 1, and blacklist/whitelist rules integrated."

@@ -1,0 +1,29 @@
+#!/bin/bash
+set -e
+
+# Create nginx system user if not exists
+if ! id -u nginx > /dev/null 2>&1; then
+    useradd --system --no-create-home --shell /bin/false nginx
+fi
+
+# Create necessary directories
+mkdir -p /var/log/nginx
+mkdir -p /var/cache/nginx
+mkdir -p /etc/nginx/conf.d
+mkdir -p /home/system/modsecurity/common
+
+# Set permissions
+chown -R nginx:nginx /var/log/nginx
+chown -R nginx:nginx /var/cache/nginx
+chown -R nginx:nginx /home/system/modsecurity/common || true
+
+# Update library cache
+ldconfig || true
+
+# Enable and start systemd service if available
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload || true
+    systemctl enable nginx.service || true
+fi
+
+exit 0

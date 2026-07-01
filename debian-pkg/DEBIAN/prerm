@@ -1,0 +1,10 @@
+#!/bin/bash
+set -e
+
+# Stop nginx if running
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl stop nginx.service 2>/dev/null || true
+    systemctl disable nginx.service 2>/dev/null || true
+fi
+
+exit 0
