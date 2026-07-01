@@ -1,43 +1,59 @@
-name: Publish Docker image to GHCR
+name: Publish NGINX release artifact
 
 on:
   workflow_dispatch:
   push:
-    branches:
-      - master
+    tags:
+      - 'v*'
 
 permissions:
-  contents: read
-  packages: write
+  contents: write
 
 jobs:
-  build-and-push:
+  build-and-release:
     runs-on: ubuntu-latest
+    timeout-minutes: 180
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Configure artifact output paths
+        shell: bash
+        run: |
+          echo "ARTIFACT_ROOT=${RUNNER_TEMP}/nginx-artifact" >> "$GITHUB_ENV"
+          echo "ARTIFACT_TARBALL=${RUNNER_TEMP}/nginx-artifact.tar.gz" >> "$GITHUB_ENV"
 
-      - name: Extract Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha
+      - name: Build NGINX artifact
+        shell: bash
+        env:
+          BASE: ${{ runner.temp }}/nginx-build
+          OUT_PREFIX: ${{ runner.temp }}/nginx-artifact/usr/share/nginx
+          CONF_PATH: ${{ runner.temp }}/nginx-artifact/etc/nginx/nginx.conf
+          MODULES_PATH: ${{ runner.temp }}/nginx-artifact/usr/lib/nginx/modules
+          PID_PATH: ${{ runner.temp }}/nginx-artifact/run/nginx.pid
+          LOCK_PATH: ${{ runner.temp }}/nginx-artifact/run/lock/subsys/nginx
+          LOGS_DIR: ${{ runner.temp }}/nginx-artifact/var/log/nginx
+          ACCESS_LOG: ${{ runner.temp }}/nginx-artifact/var/log/nginx/access.log
+          ERROR_LOG: ${{ runner.temp }}/nginx-artifact/var/log/nginx/error.log
+        run: |
+          sudo bash ./nginx-production-tpe-v22.sh
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v6
+      - name: Package artifact
+        shell: bash
+        run: |
+          mkdir -p "${ARTIFACT_ROOT}"
+          tar -C "${ARTIFACT_ROOT}" -czf "${ARTIFACT_TARBALL}" .
+          ls -lh "${ARTIFACT_TARBALL}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          context: .
-          file: ./Dockerfile.build
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tag_name: ${{ github.ref_name || format('build-{0}', github.run_id) }}
+          name: NGINX build ${{ github.run_id }}
+          draft: false
+          prerelease: true
+          files: ${{ env.ARTIFACT_TARBALL }}
+          body: |
+            Built NGINX artifact from commit ${{ github.sha }}.
+            The asset is a tar.gz archive containing the installed NGINX tree.

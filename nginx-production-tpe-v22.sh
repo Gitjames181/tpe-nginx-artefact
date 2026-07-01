@@ -15,10 +15,10 @@ NGINX_VERSION="1.28.0"
 OPENSSL_QUIC_REPO="https://github.com/quictls/openssl.git"
 OPENSSL_QUIC_BRANCH="openssl-3.1.4+quic"
 
-BASE="${HOME}/nginx-build"
-SRC_DIR="${BASE}/src"
-DEPS_DIR="${BASE}/deps"
-LOG_FILE="${BASE}/build.log"
+BASE="${BASE:-${HOME}/nginx-build}"
+SRC_DIR="${SRC_DIR:-${BASE}/src}"
+DEPS_DIR="${DEPS_DIR:-${BASE}/deps}"
+LOG_FILE="${LOG_FILE:-${BASE}/build.log}"
 
 usage() {
   cat <<'EOF'
@@ -30,14 +30,14 @@ EOF
 }
 
 # User-specified paths from the original configuration
-OUT_PREFIX="/usr/share/nginx"
-CONF_PATH="/etc/nginx/nginx.conf"
-MODULES_PATH="/usr/lib/nginx/modules"
-PID_PATH="/run/nginx.pid"
-LOCK_PATH="/run/lock/subsys/nginx"
-LOGS_DIR="/var/log/nginx"
-ACCESS_LOG="${LOGS_DIR}/access.log"
-ERROR_LOG="${LOGS_DIR}/error.log"
+OUT_PREFIX="${OUT_PREFIX:-/usr/share/nginx}"
+CONF_PATH="${CONF_PATH:-/etc/nginx/nginx.conf}"
+MODULES_PATH="${MODULES_PATH:-/usr/lib/nginx/modules}"
+PID_PATH="${PID_PATH:-/run/nginx.pid}"
+LOCK_PATH="${LOCK_PATH:-/run/lock/subsys/nginx}"
+LOGS_DIR="${LOGS_DIR:-/var/log/nginx}"
+ACCESS_LOG="${ACCESS_LOG:-${LOGS_DIR}/access.log}"
+ERROR_LOG="${ERROR_LOG:-${LOGS_DIR}/error.log}"
 
 # ---------- Toolchain Flags ----------
 export CC="gcc"
