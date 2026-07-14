@@ -21,6 +21,15 @@ SRC_DIR="${SRC_DIR:-${BASE}/src}"
 DEPS_DIR="${DEPS_DIR:-${BASE}/deps}"
 LOG_FILE="${LOG_FILE:-${BASE}/build.log}"
 
+# Temporary install prefix for ModSecurity — never touches the live filesystem.
+# nginx links against this at build time; the runtime files are then staged into
+# DESTDIR so the .deb is fully self-contained.
+MODSEC_PREFIX="${BASE}/modsec-build"
+
+# On-target paths (written into the binary as rpath / config includes).
+MODSEC_INSTALL_PATH="${MODSEC_INSTALL_PATH:-/usr/local/modsecurity}"
+CRS_INSTALL_PATH="${CRS_INSTALL_PATH:-/etc/nginx/owasp-crs}"
+
 usage() {
   cat <<'EOF'
 Usage: sudo bash nginx-production-tpe-v23.sh
@@ -108,8 +117,7 @@ get_build_jobs() {
 
 ensure_dirs() {
   msg "Creating build directory structure..."
-  # FIX: never write /etc/nginx directly on the host during a package build.
-  mkdir -p "${SRC_DIR}" "${DEPS_DIR}" "${LOGS_DIR}"
+  mkdir -p "${SRC_DIR}" "${DEPS_DIR}" "${MODSEC_PREFIX}" "${LOGS_DIR}"
   mkdir -p "$(dirname "$CONF_PATH")"
   touch "${LOG_FILE}"
   exec > >(tee -a "${LOG_FILE}") 2>&1
@@ -213,20 +221,18 @@ build_openssl_quic() {
 }
 
 build_modsecurity() {
-  # NOTE: libmodsecurity is installed to a fixed, non-DESTDIR path
-  # (/usr/local/modsecurity) because it is needed on THIS machine to link
-  # nginx against at compile time. It is a build/runtime *dependency*,
-  # not part of the nginx package payload itself. If your target hosts
-  # need libmodsecurity.so at runtime, ship it as a separate .deb (or add
-  # it as a Depends: entry backed by its own package) — this script does
-  # not currently stage it into $DESTDIR.
-  msg "Building libmodsecurity (standalone dependency)..."
+  # Installs into MODSEC_PREFIX (a temp dir inside the build tree) so the
+  # runner filesystem is never touched. nginx links against this prefix at
+  # compile time. stage_modsecurity() later copies the runtime files into
+  # DESTDIR so the final .deb is fully self-contained.
+  msg "Building libmodsecurity into temp prefix ${MODSEC_PREFIX}..."
+  mkdir -p "${MODSEC_PREFIX}"
   cd "${DEPS_DIR}/ModSecurity"
   git submodule update --init --recursive -q
   make clean 2>/dev/null || true
   make distclean 2>/dev/null || true
   ./build.sh
-  ./configure --prefix="/usr/local/modsecurity" \
+  ./configure --prefix="${MODSEC_PREFIX}" \
               --with-maxmind \
               --with-libxml \
               --with-ssdeep \
@@ -237,55 +243,79 @@ build_modsecurity() {
   local jobs
   jobs="$(get_build_jobs)"
   make -j"${jobs}"
-  make install
-  echo "/usr/local/modsecurity/lib" > /etc/ld.so.conf.d/modsecurity.conf
-  ldconfig
-  msg "ModSecurity built and installed successfully"
+  # DESTDIR="" ensures this always lands in MODSEC_PREFIX regardless of any
+  # ambient DESTDIR set by the CI environment.
+  make install DESTDIR=""
+  msg "ModSecurity built and installed into ${MODSEC_PREFIX}"
+}
+
+stage_modsecurity() {
+  # Copies the ModSecurity runtime files from the temp build prefix into DESTDIR
+  # so they are bundled inside the .deb. The build toolchain stays clean — nothing
+  # is installed into the runner's /usr/local or any other host path.
+  msg "Staging ModSecurity runtime into package root..."
+  local dest
+  dest="$(pkgpath "${MODSEC_INSTALL_PATH}")"
+  mkdir -p "${dest}"
+
+  # lib: the shared library and any pkgconfig metadata
+  cp -a "${MODSEC_PREFIX}/lib" "${dest}/"
+
+  # include: headers (needed if downstream packages compile against this .deb)
+  cp -a "${MODSEC_PREFIX}/include" "${dest}/"
+
+  msg "ModSecurity runtime staged into ${dest}"
 }
 
 install_modsecurity_crs() {
-  # NOTE: same caveat as build_modsecurity() above — the CRS rule tree is
-  # written to a fixed host path (/usr/local/modsecurity-crs), not staged
-  # under $DESTDIR. Only modsecurity.conf itself is now correctly staged.
-  # If you need the CRS rules shipped inside the .deb, point CRS_DIR/LINK_DIR
-  # at $(pkgpath ...) as well and adjust Include paths in modsecurity.conf
-  # to the on-target (non-DESTDIR-prefixed) location.
-  msg "Installing OWASP Core Rule Set (CRS)..."
-  local CRS_DIR="/usr/local/modsecurity-crs"
-  local LINK_DIR="/home/system/modsecurity/common"
+  # Everything is staged under DESTDIR so the .deb is fully self-contained.
+  # On-target Include paths use CRS_INSTALL_PATH (no DESTDIR prefix) because
+  # those paths are evaluated after the package is installed on the server.
+  msg "Staging OWASP Core Rule Set (CRS) into package root..."
 
-  clone_or_update "https://github.com/coreruleset/coreruleset.git" "$CRS_DIR"
+  local CRS_SRC="${BASE}/coreruleset"
+  local CRS_DEST
+  CRS_DEST="$(pkgpath "${CRS_INSTALL_PATH}")"
+  local CUSTOM_DIR
+  CUSTOM_DIR="$(pkgpath /etc/nginx/modsecurity-custom)"
 
-  cp "$CRS_DIR/crs-setup.conf.example" "$CRS_DIR/crs-setup.conf"
-  find "$CRS_DIR/rules" -name '*.example' -exec bash -c 'f="{}"; cp "$f" "${f%.example}"' \;
+  clone_or_update "https://github.com/coreruleset/coreruleset.git" "${CRS_SRC}"
 
-  mkdir -p "$LINK_DIR"
-  ln -sf "$CRS_DIR/crs-setup.conf" "$LINK_DIR/crs-setup.conf"
-  ln -sf "$CRS_DIR/rules" "$LINK_DIR/rules"
+  mkdir -p "${CRS_DEST}/rules"
+  cp "${CRS_SRC}/crs-setup.conf.example" "${CRS_DEST}/crs-setup.conf"
+  find "${CRS_SRC}/rules" -name '*.example' -exec bash -c \
+    'f="{}"; dest="${CRS_DEST}/rules/$(basename "${f%.example}")"; cp "$f" "$dest"' \
+    CRS_DEST="${CRS_DEST}" \;
+  # Copy non-example rule files too
+  find "${CRS_SRC}/rules" -maxdepth 1 -name '*.conf' -exec cp {} "${CRS_DEST}/rules/" \;
 
-  # FIX: stage modsecurity.conf under $DESTDIR so it ends up in the package.
   local MODSEC_CONF
   MODSEC_CONF="$(pkgpath /etc/nginx/modsecurity.conf)"
   mkdir -p "$(dirname "$MODSEC_CONF")"
 
   cp "${DEPS_DIR}/ModSecurity/modsecurity.conf-recommended" "$MODSEC_CONF"
+  # Copy the unicode mapping file required by ModSecurity at runtime
+  cp "${DEPS_DIR}/ModSecurity/unicode.mapping" "$(pkgpath /etc/nginx/unicode.mapping)"
   sed -i 's/SecRuleEngine DetectionOnly/SecRuleEngine On/' "$MODSEC_CONF"
-  sed -i '/SecAuditLogParts/s/ABIJDEFHZ/ABIJDEFHZ/' "$MODSEC_CONF"
-  echo -e "\nInclude $LINK_DIR/crs-setup.conf\nInclude $LINK_DIR/rules/*.conf" >> "$MODSEC_CONF"
+  # Point unicode mapping at the on-target path
+  sed -i "s|.*SecUnicodeMapFile.*|SecUnicodeMapFile /etc/nginx/unicode.mapping|" "$MODSEC_CONF"
+  printf '\nInclude %s/crs-setup.conf\nInclude %s/rules/*.conf\n' \
+    "${CRS_INSTALL_PATH}" "${CRS_INSTALL_PATH}" >> "$MODSEC_CONF"
 
-  mkdir -p "$LINK_DIR/custom"
-  cat > "$LINK_DIR/custom/ip-blacklist.conf" <<EOF
+  mkdir -p "${CUSTOM_DIR}"
+  cat > "${CUSTOM_DIR}/ip-blacklist.conf" <<'EOF'
 # Deny malicious IP
 SecRule REMOTE_ADDR "@ipMatch 192.0.2.123" "id:1000001,phase:1,deny,log,msg:'Blacklisted IP address'"
 EOF
 
-  cat > "$LINK_DIR/custom/ip-whitelist.conf" <<EOF
+  cat > "${CUSTOM_DIR}/ip-whitelist.conf" <<'EOF'
 # Allow trusted IP before other rules
 SecRule REMOTE_ADDR "@ipMatch 203.0.113.1" "id:1000002,phase:1,pass,nolog,ctl:ruleEngine=Off"
 EOF
-  echo -e "\nInclude $LINK_DIR/custom/ip-whitelist.conf\nInclude $LINK_DIR/custom/ip-blacklist.conf" >> "$MODSEC_CONF"
 
-  msg "CRS installed with paranoia level 1, and blacklist/whitelist rules integrated."
+  printf '\nInclude /etc/nginx/modsecurity-custom/ip-whitelist.conf\nInclude /etc/nginx/modsecurity-custom/ip-blacklist.conf\n' >> "$MODSEC_CONF"
+
+  msg "CRS staged into ${CRS_DEST}"
 }
 
 configure_nginx() {
@@ -301,17 +331,20 @@ configure_nginx() {
     die "OpenSSL source not found. Run download_source_code first."
   fi
 
-  if [[ ! -f "/usr/local/modsecurity/lib/libmodsecurity.so" ]]; then
+  if [[ ! -f "${MODSEC_PREFIX}/lib/libmodsecurity.so" ]]; then
     die "ModSecurity not built. Run build_modsecurity first."
   fi
 
-  local MODSEC_INC_DIR="/usr/local/modsecurity/include"
-  local MODSEC_LIB_DIR="/usr/local/modsecurity/lib"
+  local MODSEC_INC_DIR="${MODSEC_PREFIX}/include"
+  local MODSEC_LIB_DIR="${MODSEC_PREFIX}/lib"
   local OPENSSL_SRC_DIR="${DEPS_DIR}/openssl-quic"
   local ZLIB_DIR="${DEPS_DIR}/zlib-ng"
 
   local LDFLAGS="-L${MODSEC_LIB_DIR}"
-  local LDLIBS="-lmodsecurity -ljemalloc"
+  # rpath bakes the on-target lib path into the nginx binary so ldconfig is not
+  # required after deployment — the dynamic linker finds libmodsecurity.so
+  # directly under MODSEC_INSTALL_PATH on the target server.
+  local LDLIBS="-lmodsecurity -ljemalloc -Wl,-rpath,${MODSEC_INSTALL_PATH}/lib"
   local SECURITY_FLAGS="-Wl,-z,relro -Wl,-z,now -pie"
 
   ./configure \
@@ -509,6 +542,7 @@ download_source_code
 build_zlib_ng
 build_openssl_quic
 build_modsecurity
+stage_modsecurity
 install_modsecurity_crs
 configure_nginx
 compile_and_install_nginx

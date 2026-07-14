@@ -19,7 +19,14 @@ jobs:
       - name: Configure package paths
         run: |
           echo "PKGROOT=${RUNNER_TEMP}/pkgroot" >> $GITHUB_ENV
-          echo "DEBFILE=${RUNNER_TEMP}/tpe-nginx_${GITHUB_REF_NAME#v}_amd64.deb" >> $GITHUB_ENV
+          # On workflow_dispatch (no tag), fall back to 0.0.0+dev so the .deb
+          # has a valid version and can be installed for testing.
+          PKG_VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$PKG_VERSION" == "$GITHUB_REF_NAME" && ! "$GITHUB_REF" == refs/tags/* ]]; then
+            PKG_VERSION="0.0.0+dev"
+          fi
+          echo "PKG_VERSION=${PKG_VERSION}" >> $GITHUB_ENV
+          echo "DEBFILE=${RUNNER_TEMP}/tpe-nginx_${PKG_VERSION}_amd64.deb" >> $GITHUB_ENV
       - name: Build NGINX
         env:
           DESTDIR: ${{ runner.temp }}/pkgroot
@@ -30,23 +37,33 @@ jobs:
       - name: Create Debian control file
         run: |
           mkdir -p "${PKGROOT}/DEBIAN"
-          cat > "${PKGROOT}/DEBIAN/control" <<EOF
-          Package: tpe-nginx
-          Version: ${GITHUB_REF_NAME#v}
-          Section: web
-          Priority: optional
-          Architecture: amd64
-          Maintainer: James Wilson
-          Depends: libc6
-          Description: TPE Hardened NGINX
-           Custom compiled NGINX with security modules.
-          EOF
+          cat > "${PKGROOT}/DEBIAN/control" <<'EOF'
+Package: tpe-nginx
+Version: PLACEHOLDER
+Section: web
+Priority: optional
+Architecture: amd64
+Maintainer: James Wilson
+Depends: libc6, libyajl2, libxml2, libmaxminddb0, libpcre2-8-0, libfuzzy2, liblua5.3-0, libcurl3-gnutls | libcurl4, libjemalloc2, libgd3
+Description: TPE Hardened NGINX
+ Custom compiled NGINX with HTTP/3, ModSecurity v3, Brotli, and OWASP CRS.
+ Bundled: libmodsecurity, ngx_brotli, headers-more, ModSecurity-nginx.
+EOF
+          # Inject version after the heredoc so shell expansion works cleanly
+          sed -i "s/^Version: PLACEHOLDER/Version: ${PKG_VERSION}/" "${PKGROOT}/DEBIAN/control"
       - name: Build Debian package
         run: |
           fakeroot dpkg-deb --build "${PKGROOT}" "${DEBFILE}"
           dpkg-deb --info "${DEBFILE}"
           dpkg-deb --contents "${DEBFILE}"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tpe-nginx-deb
+          path: ${{ env.DEBFILE }}
+          retention-days: 7
       - name: Publish Release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
