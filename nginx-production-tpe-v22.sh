@@ -4,8 +4,9 @@
 # - Builds NGINX with all dependencies from source trees for a
 #   clean, self-contained, and repeatable build (hermetic).
 # - Supports QUIC/HTTP/3, ModSecurity v3, Brotli, and more.
-# - This script is designed to build the exact NGINX configuration
-#   specified by the user.
+# - DESTDIR-aware throughout, so the exact same script can:
+#     * install normally on a host  (DESTDIR="")
+#     * stage a Debian package root (DESTDIR=/some/path)
 # =====================================================================
 
 set -Eeuo pipefail
@@ -22,14 +23,20 @@ LOG_FILE="${LOG_FILE:-${BASE}/build.log}"
 
 usage() {
   cat <<'EOF'
-Usage: sudo bash nginx-production-tpe-v22.sh
+Usage: sudo bash nginx-production-tpe-v23.sh
 
 Builds a hermetic, from-source NGINX artifact with HTTP/3, ModSecurity, Brotli,
 headers-more, and other production-oriented modules for Ubuntu/Debian servers.
+
+Env vars of note:
+  DESTDIR   - if set, all package payload is staged under this path
+              (required for producing a .deb; leave empty for a normal install)
 EOF
 }
 
-# User-specified paths from the original configuration
+# User-specified paths from the original configuration.
+# NOTE: these must always be the *final on-target* paths (e.g. /etc/nginx/nginx.conf),
+# never prefixed with a runner temp dir. DESTDIR is what does the staging.
 OUT_PREFIX="${OUT_PREFIX:-/usr/share/nginx}"
 CONF_PATH="${CONF_PATH:-/etc/nginx/nginx.conf}"
 MODULES_PATH="${MODULES_PATH:-/usr/lib/nginx/modules}"
@@ -39,11 +46,17 @@ LOGS_DIR="${LOGS_DIR:-/var/log/nginx}"
 ACCESS_LOG="${ACCESS_LOG:-${LOGS_DIR}/access.log}"
 ERROR_LOG="${ERROR_LOG:-${LOGS_DIR}/error.log}"
 
+# Compile Destination — when set, this script behaves as a *package builder*,
+# never touching the live filesystem outside of $DESTDIR.
+DESTDIR="${DESTDIR:-}"
+
+pkgpath() {
+    printf "%s%s" "$DESTDIR" "$1"
+}
+
 # ---------- Toolchain Flags ----------
 export CC="gcc"
 export CFLAGS="-O2 -fstack-protector-strong -Wformat -Werror=format-security -D_FORTIFY_SOURCE=2"
-# Note: The original LDFLAGS are now combined with the ModSecurity flags in the configure command
-# to avoid the syntax error.
 
 # ---------- Helpers ----------
 msg()  { echo -e "\e[1;32m==>\e[0m $*"; }
@@ -95,7 +108,9 @@ get_build_jobs() {
 
 ensure_dirs() {
   msg "Creating build directory structure..."
-  mkdir -p "${SRC_DIR}" "${DEPS_DIR}" "${LOGS_DIR}" /etc/nginx
+  # FIX: never write /etc/nginx directly on the host during a package build.
+  mkdir -p "${SRC_DIR}" "${DEPS_DIR}" "${LOGS_DIR}"
+  mkdir -p "$(dirname "$CONF_PATH")"
   touch "${LOG_FILE}"
   exec > >(tee -a "${LOG_FILE}") 2>&1
   cd "${BASE}"
@@ -143,21 +158,17 @@ build_zlib_ng() {
   local jobs
   jobs="$(get_build_jobs)"
   cd "${DEPS_DIR}/zlib-ng"
-  # Clean any previous builds
   rm -rf build libz.a 2>/dev/null || true
-  
-  # Use a conservative cmake build in containers and other constrained environments
+
   cmake -B build -DCMAKE_BUILD_TYPE=Release -DZLIB_COMPAT=ON -DBUILD_SHARED_LIBS=OFF -DZLIB_ENABLE_TESTS=OFF .
   cmake --build build --parallel "${jobs}"
-  
-  # Find and copy the static library to where nginx expects it
+
   find build -name "libz*.a" -exec cp {} ./libz.a \;
-  
-  # Verify it was created
+
   if [[ ! -f ./libz.a ]]; then
     die "zlib-ng build failed - libz.a not found"
   fi
-  
+
   msg "zlib-ng built successfully"
 }
 
@@ -166,10 +177,8 @@ build_openssl_quic() {
   local jobs
   jobs="$(get_build_jobs)"
   cd "${DEPS_DIR}/openssl-quic"
-  # Clean any previous builds
   make clean 2>/dev/null || true
   make distclean 2>/dev/null || true
-  # Configure for static build with QUIC support
   local openssl_config_args=(
     --prefix="${DEPS_DIR}/openssl-quic/build"
     no-shared
@@ -189,17 +198,14 @@ build_openssl_quic() {
   fi
 
   ./config "${openssl_config_args[@]}"
-  # Build and install only the libraries and headers needed by nginx
   make -j"${jobs}"
   make install_sw
-  # Handle lib64 vs lib directory - create symlinks so nginx configure can find libraries
   if [[ -f "${DEPS_DIR}/openssl-quic/build/lib64/libcrypto.a" ]] && [[ ! -d "${DEPS_DIR}/openssl-quic/build/lib" ]]; then
     msg "Creating lib symlink to lib64 for nginx compatibility..."
     mkdir -p "${DEPS_DIR}/openssl-quic/build/lib"
     ln -sf "${DEPS_DIR}/openssl-quic/build/lib64/libcrypto.a" "${DEPS_DIR}/openssl-quic/build/lib/"
     ln -sf "${DEPS_DIR}/openssl-quic/build/lib64/libssl.a" "${DEPS_DIR}/openssl-quic/build/lib/"
   fi
-  # Verify the library is accessible in the expected location
   if [[ ! -f "${DEPS_DIR}/openssl-quic/build/lib/libcrypto.a" ]]; then
     die "OpenSSL build failed - libcrypto.a not found in lib directory"
   fi
@@ -207,16 +213,19 @@ build_openssl_quic() {
 }
 
 build_modsecurity() {
+  # NOTE: libmodsecurity is installed to a fixed, non-DESTDIR path
+  # (/usr/local/modsecurity) because it is needed on THIS machine to link
+  # nginx against at compile time. It is a build/runtime *dependency*,
+  # not part of the nginx package payload itself. If your target hosts
+  # need libmodsecurity.so at runtime, ship it as a separate .deb (or add
+  # it as a Depends: entry backed by its own package) — this script does
+  # not currently stage it into $DESTDIR.
   msg "Building libmodsecurity (standalone dependency)..."
   cd "${DEPS_DIR}/ModSecurity"
-  # Ensure submodules are initialized
   git submodule update --init --recursive -q
-  # Clean any previous builds
   make clean 2>/dev/null || true
   make distclean 2>/dev/null || true
-  # Build with proper dependencies
   ./build.sh
-  # Configure with all required dependencies and custom prefix
   ./configure --prefix="/usr/local/modsecurity" \
               --with-maxmind \
               --with-libxml \
@@ -225,42 +234,45 @@ build_modsecurity() {
               --with-yajl \
               --with-pcre2 \
               --with-curl=/usr/bin/curl-config
-  # Build and install
   local jobs
   jobs="$(get_build_jobs)"
   make -j"${jobs}"
   make install
-  # Update library cache
   echo "/usr/local/modsecurity/lib" > /etc/ld.so.conf.d/modsecurity.conf
   ldconfig
   msg "ModSecurity built and installed successfully"
 }
-################################################################################################# - In Progress
+
 install_modsecurity_crs() {
+  # NOTE: same caveat as build_modsecurity() above — the CRS rule tree is
+  # written to a fixed host path (/usr/local/modsecurity-crs), not staged
+  # under $DESTDIR. Only modsecurity.conf itself is now correctly staged.
+  # If you need the CRS rules shipped inside the .deb, point CRS_DIR/LINK_DIR
+  # at $(pkgpath ...) as well and adjust Include paths in modsecurity.conf
+  # to the on-target (non-DESTDIR-prefixed) location.
   msg "Installing OWASP Core Rule Set (CRS)..."
   local CRS_DIR="/usr/local/modsecurity-crs"
   local LINK_DIR="/home/system/modsecurity/common"
 
-  # Clone or update CRS
   clone_or_update "https://github.com/coreruleset/coreruleset.git" "$CRS_DIR"
 
-  # Prepare runtime config
   cp "$CRS_DIR/crs-setup.conf.example" "$CRS_DIR/crs-setup.conf"
   find "$CRS_DIR/rules" -name '*.example' -exec bash -c 'f="{}"; cp "$f" "${f%.example}"' \;
 
-  # Symlink ruleset to managed control directory
   mkdir -p "$LINK_DIR"
   ln -sf "$CRS_DIR/crs-setup.conf" "$LINK_DIR/crs-setup.conf"
   ln -sf "$CRS_DIR/rules" "$LINK_DIR/rules"
 
-  # Install baseline modsecurity.conf
-  local MODSEC_CONF="/etc/nginx/modsecurity.conf"
+  # FIX: stage modsecurity.conf under $DESTDIR so it ends up in the package.
+  local MODSEC_CONF
+  MODSEC_CONF="$(pkgpath /etc/nginx/modsecurity.conf)"
+  mkdir -p "$(dirname "$MODSEC_CONF")"
+
   cp "${DEPS_DIR}/ModSecurity/modsecurity.conf-recommended" "$MODSEC_CONF"
   sed -i 's/SecRuleEngine DetectionOnly/SecRuleEngine On/' "$MODSEC_CONF"
   sed -i '/SecAuditLogParts/s/ABIJDEFHZ/ABIJDEFHZ/' "$MODSEC_CONF"
   echo -e "\nInclude $LINK_DIR/crs-setup.conf\nInclude $LINK_DIR/rules/*.conf" >> "$MODSEC_CONF"
 
-  # Add blacklist and whitelist policies
   mkdir -p "$LINK_DIR/custom"
   cat > "$LINK_DIR/custom/ip-blacklist.conf" <<EOF
 # Deny malicious IP
@@ -275,33 +287,29 @@ EOF
 
   msg "CRS installed with paranoia level 1, and blacklist/whitelist rules integrated."
 }
-################################################################################################# - In Progress
 
 configure_nginx() {
   msg "Configuring NGINX ${NGINX_VERSION} with dependencies..."
   cd "${SRC_DIR}/nginx-${NGINX_VERSION}"
   make clean 2>/dev/null || true
 
-  # Verify dependencies are available (sources for nginx to build)
   if [[ ! -f "${DEPS_DIR}/zlib-ng/libz.a" ]]; then
     die "zlib-ng not built. Run build_zlib_ng first."
   fi
-  
+
   if [[ ! -d "${DEPS_DIR}/openssl-quic" ]]; then
     die "OpenSSL source not found. Run download_source_code first."
   fi
-  
+
   if [[ ! -f "/usr/local/modsecurity/lib/libmodsecurity.so" ]]; then
     die "ModSecurity not built. Run build_modsecurity first."
   fi
 
-  # The ModSecurity module requires specific paths to be passed
   local MODSEC_INC_DIR="/usr/local/modsecurity/include"
   local MODSEC_LIB_DIR="/usr/local/modsecurity/lib"
   local OPENSSL_SRC_DIR="${DEPS_DIR}/openssl-quic"
   local ZLIB_DIR="${DEPS_DIR}/zlib-ng"
 
-  # Separate the linker flags for better readability and compatibility
   local LDFLAGS="-L${MODSEC_LIB_DIR}"
   local LDLIBS="-lmodsecurity -ljemalloc"
   local SECURITY_FLAGS="-Wl,-z,relro -Wl,-z,now -pie"
@@ -343,11 +351,8 @@ configure_nginx() {
 
   test -f "objs/Makefile" || die "NGINX configure did not produce objs/Makefile."
 
-  # Patch the Makefile to avoid build issues
   msg "Patching NGINX Makefile for dependency handling..."
-  
-  # Fix the zlib-ng build command completely - nginx expects ./configure but zlib-ng uses cmake
-  # Replace the entire zlib-ng build section in the Makefile
+
   sed -i '/cd .*zlib-ng/,/libz\.a$/c\
 	cd /root/nginx-build/deps/zlib-ng \\\
 	&& if [ ! -f libz.a ]; then \\\
@@ -356,8 +361,7 @@ configure_nginx() {
 		&& cmake --build build --target zlibstatic \\\
 		&& cp build/libz.a . ; \\\
 	fi' objs/Makefile
-  
-  # Also patch OpenSSL build to be less aggressive with cleaning
+
   sed -i 's/make distclean/make clean || true/g' objs/Makefile
   sed -i 's/CFLAGS=""/CFLAGS="-O2"/g' objs/Makefile
 }
@@ -366,19 +370,32 @@ compile_and_install_nginx() {
   msg "Compiling and installing NGINX..."
   local jobs
   jobs="$(get_build_jobs)"
+
   cd "${SRC_DIR}/nginx-${NGINX_VERSION}"
+
   make -j"${jobs}"
-  make install
+
+  if [[ -n "${DESTDIR}" ]]; then
+      make install DESTDIR="${DESTDIR}"
+  else
+      make install
+  fi
 }
 
 install_systemd_service() {
-  if is_container_runtime; then
+  if is_container_runtime && [[ -z "${DESTDIR}" ]]; then
     msg "Container runtime detected; skipping systemd unit installation."
     return 0
   fi
 
   msg "Installing systemd unit nginx.service..."
-  cat > /etc/systemd/system/nginx.service <<SERVICE
+  if [[ -n "${DESTDIR}" ]]; then
+    msg "Package build detected. Installing service file only (no daemon-reload/enable)."
+  fi
+
+  SERVICE_DIR="$(pkgpath /lib/systemd/system)"
+  mkdir -p "$SERVICE_DIR"
+  cat > "$SERVICE_DIR/nginx.service" <<SERVICE
 [Unit]
 Description=The NGINX HTTP and reverse proxy server
 After=network.target remote-fs.target nss-lookup.target
@@ -396,16 +413,17 @@ PrivateTmp=true
 WantedBy=multi-user.target
 SERVICE
 
-  if command -v systemctl >/dev/null 2>&1; then
+  # FIX: never reload/enable the host's systemd while staging a package.
+  if [[ -z "${DESTDIR}" ]] && command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload
     systemctl enable nginx.service
   fi
 }
 
 write_minimal_config() {
-  msg "Writing minimal /etc/nginx/nginx.conf..."
-  mkdir -p /etc/nginx
-  cat > /etc/nginx/nginx.conf <<'CONF'
+  msg "Writing minimal nginx.conf at ${CONF_PATH}..."
+  mkdir -p "$(dirname "$CONF_PATH")"
+  cat > "$CONF_PATH" <<'CONF'
 load_module /usr/lib/nginx/modules/ngx_http_brotli_filter_module.so;
 load_module /usr/lib/nginx/modules/ngx_http_brotli_static_module.so;
 load_module /usr/lib/nginx/modules/ngx_http_headers_more_filter_module.so;
@@ -438,14 +456,21 @@ CONF
 }
 
 smoke_test() {
+  # FIX: a package build stages files under $DESTDIR — there is nothing
+  # runnable on the GitHub runner itself, so never try to start nginx here.
+  if [[ -n "${DESTDIR}" ]]; then
+    msg "Package build detected. Skipping smoke test."
+    return 0
+  fi
+
   msg "Running smoke test on :8080..."
   write_minimal_config
 
   if is_container_runtime; then
-    ${OUT_PREFIX}/sbin/nginx -c /etc/nginx/nginx.conf
+    "${OUT_PREFIX}/sbin/nginx" -c "$CONF_PATH"
     sleep 1
     curl -fsS http://127.0.0.1:8080/
-    ${OUT_PREFIX}/sbin/nginx -s quit || true
+    "${OUT_PREFIX}/sbin/nginx" -s quit || true
     return 0
   fi
 
@@ -457,10 +482,10 @@ smoke_test() {
     return 0
   fi
 
-  ${OUT_PREFIX}/sbin/nginx -c /etc/nginx/nginx.conf
+  "${OUT_PREFIX}/sbin/nginx" -c "$CONF_PATH"
   sleep 1
   curl -fsS http://127.0.0.1:8080/
-  ${OUT_PREFIX}/sbin/nginx -s quit || true
+  "${OUT_PREFIX}/sbin/nginx" -s quit || true
 }
 
 # ---------- Main Execution Flow ----------
