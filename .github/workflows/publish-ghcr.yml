@@ -1,42 +1,35 @@
 name: Publish NGINX Debian Package
-
 on:
   workflow_dispatch:
   push:
     tags:
       - 'v*'
-
 permissions:
   contents: write
-
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 180
-
     steps:
       - uses: actions/checkout@v4
-
       - name: Install packaging tools
         run: |
           sudo apt-get update
           sudo apt-get install -y dpkg-dev fakeroot
-
       - name: Configure package paths
         run: |
           echo "PKGROOT=${RUNNER_TEMP}/pkgroot" >> $GITHUB_ENV
           echo "DEBFILE=${RUNNER_TEMP}/tpe-nginx_${GITHUB_REF_NAME#v}_amd64.deb" >> $GITHUB_ENV
-
       - name: Build NGINX
         env:
           DESTDIR: ${{ runner.temp }}/pkgroot
+          HOME: /root
         run: |
           sudo -E bash ./nginx-production-tpe-v22.sh
-
+          sudo chown -R "$(id -u):$(id -g)" "${PKGROOT}"
       - name: Create Debian control file
         run: |
           mkdir -p "${PKGROOT}/DEBIAN"
-
           cat > "${PKGROOT}/DEBIAN/control" <<EOF
           Package: tpe-nginx
           Version: ${GITHUB_REF_NAME#v}
@@ -48,13 +41,11 @@ jobs:
           Description: TPE Hardened NGINX
            Custom compiled NGINX with security modules.
           EOF
-
       - name: Build Debian package
         run: |
           fakeroot dpkg-deb --build "${PKGROOT}" "${DEBFILE}"
           dpkg-deb --info "${DEBFILE}"
           dpkg-deb --contents "${DEBFILE}"
-
       - name: Publish Release
         uses: softprops/action-gh-release@v2
         with:
