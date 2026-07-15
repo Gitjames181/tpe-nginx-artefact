@@ -17,32 +17,50 @@ jobs:
 
       - name: Install packaging tools
         run: |
+          set -Eeuo pipefail
           sudo apt-get update
           sudo apt-get install -y dpkg-dev fakeroot
 
       - name: Configure package paths
         run: |
+          set -Eeuo pipefail
           echo "PKGROOT=${RUNNER_TEMP}/pkgroot" >> $GITHUB_ENV
           # On workflow_dispatch (no tag), fall back to 0.0.0+dev so the .deb
           # has a valid version and can be installed for testing.
           PKG_VERSION="${GITHUB_REF_NAME#v}"
           if [[ "$PKG_VERSION" == "$GITHUB_REF_NAME" && ! "$GITHUB_REF" == refs/tags/* ]]; then
-            PKG_VERSION="0.0.0+dev"
+            PKG_VERSION="0.0.0+dev.${GITHUB_RUN_NUMBER}"
           fi
+          DEB_NAME="tpe-nginx_${PKG_VERSION}_amd64.deb"
           echo "PKG_VERSION=${PKG_VERSION}" >> $GITHUB_ENV
-          echo "DEBFILE=${RUNNER_TEMP}/tpe-nginx_${PKG_VERSION}_amd64.deb" >> $GITHUB_ENV
+          echo "DEB_NAME=${DEB_NAME}" >> $GITHUB_ENV
+          echo "DEBFILE=${RUNNER_TEMP}/${DEB_NAME}" >> $GITHUB_ENV
+          rm -rf "${RUNNER_TEMP}/pkgroot"
+          mkdir -p "${RUNNER_TEMP}/pkgroot"
 
       - name: Build NGINX
         env:
           DESTDIR: ${{ runner.temp }}/pkgroot
           HOME: /root
         run: |
+          set -Eeuo pipefail
           sudo -E bash ./nginx-production-tpe-v22.sh
           sudo chown -R "$(id -u):$(id -g)" "${PKGROOT}"
 
+      - name: Assert package payload exists
+        run: |
+          set -Eeuo pipefail
+          test -x "${PKGROOT}/usr/share/nginx/sbin/nginx"
+          test -f "${PKGROOT}/lib/systemd/system/nginx.service"
+          test -f "${PKGROOT}/etc/nginx/modsecurity.conf"
+          test -f "${PKGROOT}/usr/lib/nginx/modules/ngx_http_modsecurity_module.so"
+
       - name: Create Debian control file
         run: |
+          set -Eeuo pipefail
           mkdir -p "${PKGROOT}/DEBIAN"
+          install -m 0755 debian-pkg/DEBIAN/postinst "${PKGROOT}/DEBIAN/postinst"
+          install -m 0755 debian-pkg/DEBIAN/prerm "${PKGROOT}/DEBIAN/prerm"
           cat > "${PKGROOT}/DEBIAN/control" <<'EOF'
 Package: tpe-nginx
 Version: PLACEHOLDER
@@ -60,9 +78,29 @@ EOF
 
       - name: Build Debian package
         run: |
+          set -Eeuo pipefail
           fakeroot dpkg-deb --build "${PKGROOT}" "${DEBFILE}"
           dpkg-deb --info "${DEBFILE}"
           dpkg-deb --contents "${DEBFILE}"
+
+      - name: Validate install in clean Ubuntu container
+        run: |
+          set -Eeuo pipefail
+          docker run --rm \
+            -e DEB_NAME="${DEB_NAME}" \
+            -v "${RUNNER_TEMP}:/artifacts:ro" \
+            ubuntu:24.04 \
+            bash -euxo pipefail -c '
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "/artifacts/${DEB_NAME}" || {
+                DEBIAN_FRONTEND=noninteractive apt-get -f install -y
+                DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "/artifacts/${DEB_NAME}"
+              }
+              dpkg -s tpe-nginx
+              /usr/share/nginx/sbin/nginx -V
+              /usr/share/nginx/sbin/nginx -t
+            '
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
