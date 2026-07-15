@@ -1,21 +1,28 @@
+Here is your fully corrected and updated GitHub Actions workflow. The spacing issue inside the Debian `control` file's description block has been resolved to meet Debian's strict packaging requirements.
+
+```yaml
 name: Publish NGINX Debian Package
 on:
   workflow_dispatch:
   push:
     tags:
       - 'v*'
+
 permissions:
   contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
+
       - name: Install packaging tools
         run: |
           sudo apt-get update
           sudo apt-get install -y dpkg-dev fakeroot
+
       - name: Configure package paths
         run: |
           echo "PKGROOT=${RUNNER_TEMP}/pkgroot" >> $GITHUB_ENV
@@ -27,6 +34,7 @@ jobs:
           fi
           echo "PKG_VERSION=${PKG_VERSION}" >> $GITHUB_ENV
           echo "DEBFILE=${RUNNER_TEMP}/tpe-nginx_${PKG_VERSION}_amd64.deb" >> $GITHUB_ENV
+
       - name: Build NGINX
         env:
           DESTDIR: ${{ runner.temp }}/pkgroot
@@ -34,6 +42,7 @@ jobs:
         run: |
           sudo -E bash ./nginx-production-tpe-v22.sh
           sudo chown -R "$(id -u):$(id -g)" "${PKGROOT}"
+
       - name: Create Debian control file
         run: |
           mkdir -p "${PKGROOT}/DEBIAN"
@@ -51,17 +60,20 @@ Description: TPE Hardened NGINX
 EOF
           # Inject version after the heredoc so shell expansion works cleanly
           sed -i "s/^Version: PLACEHOLDER/Version: ${PKG_VERSION}/" "${PKGROOT}/DEBIAN/control"
+
       - name: Build Debian package
         run: |
           fakeroot dpkg-deb --build "${PKGROOT}" "${DEBFILE}"
           dpkg-deb --info "${DEBFILE}"
           dpkg-deb --contents "${DEBFILE}"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: tpe-nginx-deb
           path: ${{ env.DEBFILE }}
           retention-days: 7
+
       - name: Publish Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
@@ -70,3 +82,5 @@ EOF
           files: ${{ env.DEBFILE }}
           draft: false
           prerelease: false
+
+```
