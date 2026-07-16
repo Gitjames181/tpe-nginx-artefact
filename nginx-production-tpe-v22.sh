@@ -29,6 +29,11 @@ MODSEC_PREFIX="${BASE}/modsec-build"
 # On-target paths (written into the binary as rpath / config includes).
 MODSEC_INSTALL_PATH="${MODSEC_INSTALL_PATH:-/usr/local/modsecurity}"
 CRS_INSTALL_PATH="${CRS_INSTALL_PATH:-/etc/nginx/owasp-crs}"
+OPENSSL_TARGET="${OPENSSL_TARGET:-$(case "$(uname -m)" in
+  aarch64|arm64) echo linux-aarch64 ;;
+  x86_64|amd64) echo linux-x86_64 ;;
+  *) echo linux-x86_64 ;;
+esac)}"
 
 usage() {
   cat <<'EOF'
@@ -133,6 +138,41 @@ install_system_deps() {
     libyajl-dev libmaxminddb-dev doxygen ca-certificates perl autoconf-archive \
     libpcre2-dev libfuzzy-dev liblua5.3-dev libcurl4-gnutls-dev libxml2-dev \
     libjemalloc-dev libgd-dev cmake
+
+  # Ubuntu/Debian provide libfuzzy, but ModSecurity's ssdeep probe expects
+  # a pkg-config entry named ssdeep. Create a compatibility .pc when needed.
+  # On multiarch systems (e.g. arm64) libfuzzy.so lives in /usr/lib/<triplet>/
+  # so the .pc must point libdir there, not the bare /usr/lib fallback.
+  local multiarch
+  local libdir
+  local pcdir
+  multiarch="$(gcc -print-multiarch 2>/dev/null || true)"
+  if [[ -n "${multiarch}" && -d "/usr/lib/${multiarch}" ]]; then
+    libdir="/usr/lib/${multiarch}"
+    pcdir="/usr/lib/${multiarch}/pkgconfig"
+  else
+    libdir="/usr/lib"
+    pcdir="/usr/lib/pkgconfig"
+  fi
+
+  if ! pkg-config --exists ssdeep 2>/dev/null && [[ -f /usr/include/fuzzy.h ]]; then
+    mkdir -p "${pcdir}"
+    cat > "${pcdir}/ssdeep.pc" <<EOF
+prefix=/usr
+exec_prefix=\${prefix}
+libdir=${libdir}
+includedir=\${prefix}/include
+
+Name: ssdeep
+Description: ssdeep compatibility pkg-config file for libfuzzy
+Version: 2.14.1
+Libs: -L${libdir} -lfuzzy
+Cflags: -I\${includedir}
+EOF
+  fi
+
+  # Ensure configure subprocesses can find the .pc regardless of environment.
+  export PKG_CONFIG_PATH="${pcdir}${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
 }
 
 clone_or_update() {
@@ -194,10 +234,13 @@ build_openssl_quic() {
     no-module
     no-asm
     enable-tls1_3
-    enable-ec_nistp_64_gcc_128
     no-tests
-    linux-x86_64
+    "${OPENSSL_TARGET}"
   )
+
+  if [[ "${OPENSSL_TARGET}" == linux-x86_64 ]]; then
+    openssl_config_args+=(enable-ec_nistp_64_gcc_128)
+  fi
 
   if ./config --help 2>&1 | grep -q -E '^\s*no-docs\b'; then
     openssl_config_args+=(no-docs)
