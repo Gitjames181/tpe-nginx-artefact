@@ -261,11 +261,12 @@ build_openssl_quic() {
   ./config "${openssl_config_args[@]}"
   make -j"${jobs}"
   make install_sw
-  if [[ -f "${DEPS_DIR}/openssl-quic/build/lib64/libcrypto.a" ]] && [[ ! -d "${DEPS_DIR}/openssl-quic/build/lib" ]]; then
-    msg "Creating lib symlink to lib64 for nginx compatibility..."
+  if [[ -f "${DEPS_DIR}/openssl-quic/build/lib64/libcrypto.a" ]] && \
+     [[ ! -f "${DEPS_DIR}/openssl-quic/build/lib/libcrypto.a" ]]; then
+    msg "Creating lib symlinks for lib64 (nginx compatibility)..."
     mkdir -p "${DEPS_DIR}/openssl-quic/build/lib"
-    ln -sf "${DEPS_DIR}/openssl-quic/build/lib64/libcrypto.a" "${DEPS_DIR}/openssl-quic/build/lib/"
-    ln -sf "${DEPS_DIR}/openssl-quic/build/lib64/libssl.a" "${DEPS_DIR}/openssl-quic/build/lib/"
+    ln -sf "${DEPS_DIR}/openssl-quic/build/lib64/libcrypto.a" "${DEPS_DIR}/openssl-quic/build/lib/libcrypto.a"
+    ln -sf "${DEPS_DIR}/openssl-quic/build/lib64/libssl.a"    "${DEPS_DIR}/openssl-quic/build/lib/libssl.a"
   fi
   if [[ ! -f "${DEPS_DIR}/openssl-quic/build/lib/libcrypto.a" ]]; then
     die "OpenSSL build failed - libcrypto.a not found in lib directory"
