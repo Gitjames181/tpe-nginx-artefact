@@ -280,8 +280,10 @@ build_zlib_ng() {
 
   # shellcheck disable=SC2086
   cmake -B build -DCMAKE_BUILD_TYPE=Release -DZLIB_COMPAT=ON -DBUILD_SHARED_LIBS=OFF \
-    -DZLIB_ENABLE_TESTS=OFF ${zlib_simd_flags} .
-  cmake --build build --parallel "${jobs}"
+    -DZLIB_ENABLE_TESTS=OFF -DINSTALL_UTILS=OFF ${zlib_simd_flags} .
+  # Build only the static library target — utility programs (minigzip etc.)
+  # are not needed and crash under QEMU emulation.
+  cmake --build build --parallel "${jobs}" --target zlib-ng
 
   find build -name "libz*.a" -exec cp {} ./libz.a \;
 
