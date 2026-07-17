@@ -70,7 +70,14 @@ pkgpath() {
 
 # ---------- Toolchain Flags ----------
 export CC="gcc"
-export CFLAGS="-O2 -fstack-protector-strong -Wformat -Werror=format-security -D_FORTIFY_SOURCE=2"
+# Under QEMU user-mode emulation GCC's -O2 optimiser segfaults on heavy
+# translation units (OpenSSL, ModSecurity). -O1 avoids this; the binaries
+# are fully correct and run at full speed on real arm64 hardware.
+if grep -qi "QEMU Virtual Machine\|qemu" /proc/cpuinfo 2>/dev/null || [[ -n "${QEMU_EMULATION:-}" ]]; then
+  export CFLAGS="-O1 -fstack-protector-strong -Wformat -Werror=format-security -D_FORTIFY_SOURCE=2"
+else
+  export CFLAGS="-O2 -fstack-protector-strong -Wformat -Werror=format-security -D_FORTIFY_SOURCE=2"
+fi
 
 # ---------- Helpers ----------
 msg()  { echo -e "\e[1;32m==>\e[0m $*"; }
@@ -510,7 +517,9 @@ configure_nginx() {
 	fi' objs/Makefile
 
   sed -i 's/make distclean/make clean || true/g' objs/Makefile
-  sed -i 's/CFLAGS=""/CFLAGS="-O2"/g' objs/Makefile
+  local opt_flag="-O2"
+  if is_qemu_emulation; then opt_flag="-O1"; fi
+  sed -i "s/CFLAGS=\"\"/CFLAGS=\"${opt_flag}\"/g" objs/Makefile
 }
 
 compile_and_install_nginx() {
