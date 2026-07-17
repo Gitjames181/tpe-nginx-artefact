@@ -140,39 +140,49 @@ install_system_deps() {
     libjemalloc-dev libgd-dev cmake
 
   # Ubuntu/Debian provide libfuzzy, but ModSecurity's ssdeep probe expects
-  # a pkg-config entry named ssdeep. Create a compatibility .pc when needed.
-  # On multiarch systems (e.g. arm64) libfuzzy.so lives in /usr/lib/<triplet>/
-  # so the .pc must point libdir there, not the bare /usr/lib fallback.
-  local multiarch
-  local libdir
-  local pcdir
-  multiarch="$(gcc -print-multiarch 2>/dev/null || true)"
-  if [[ -n "${multiarch}" && -d "/usr/lib/${multiarch}" ]]; then
-    libdir="/usr/lib/${multiarch}"
-    pcdir="/usr/lib/${multiarch}/pkgconfig"
-  else
-    libdir="/usr/lib"
-    pcdir="/usr/lib/pkgconfig"
-  fi
+  # a pkg-config entry named ssdeep. Write a compatibility .pc if needed.
+  # Use dpkg to locate the real libfuzzy.so — gcc -print-multiarch is
+  # unreliable in Docker containers and causes wrong libdir on arm64.
+  [[ -f /usr/include/fuzzy.h ]] || die "libfuzzy-dev did not install fuzzy.h"
 
-  if ! pkg-config --exists ssdeep 2>/dev/null && [[ -f /usr/include/fuzzy.h ]]; then
+  local fuzzy_so libdir pcdir
+  # find is reliable across multiarch layouts; dpkg/ldconfig queries are fragile in Docker
+  fuzzy_so="$(find /usr/lib -name 'libfuzzy.so*' -not -type d 2>/dev/null | sort | head -1)"
+  if [[ -n "$fuzzy_so" ]]; then
+    libdir="$(dirname "$fuzzy_so")"
+  else
+    local multiarch
+    multiarch="$(gcc -print-multiarch 2>/dev/null || true)"
+    libdir="${multiarch:+/usr/lib/${multiarch}}"
+    libdir="${libdir:-/usr/lib}"
+  fi
+  pcdir="${libdir}/pkgconfig"
+
+  # ModSecurity's msc_find_lib.m4 queries 'pkg-config --exists fuzzy' (not 'ssdeep'),
+  # so the compatibility file must be named fuzzy.pc with Name: fuzzy.
+  if ! pkg-config --exists fuzzy 2>/dev/null; then
     mkdir -p "${pcdir}"
-    cat > "${pcdir}/ssdeep.pc" <<EOF
+    cat > "${pcdir}/fuzzy.pc" <<EOF
 prefix=/usr
 exec_prefix=\${prefix}
 libdir=${libdir}
 includedir=\${prefix}/include
 
-Name: ssdeep
-Description: ssdeep compatibility pkg-config file for libfuzzy
+Name: fuzzy
+Description: ssdeep fuzzy hashing library (libfuzzy compatibility pkg-config)
 Version: 2.14.1
 Libs: -L${libdir} -lfuzzy
 Cflags: -I\${includedir}
 EOF
+    msg "Wrote fuzzy.pc to ${pcdir} (libdir=${libdir})"
   fi
 
-  # Ensure configure subprocesses can find the .pc regardless of environment.
+  # Ensure configure subprocesses find the .pc regardless of environment.
   export PKG_CONFIG_PATH="${pcdir}${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+
+  # Fail fast here rather than inside ModSecurity configure with an opaque error.
+  pkg-config --exists fuzzy 2>/dev/null \
+    || die "fuzzy.pc at ${pcdir} not found by pkg-config (PKG_CONFIG_PATH=${PKG_CONFIG_PATH})"
 }
 
 clone_or_update() {
@@ -275,6 +285,7 @@ build_modsecurity() {
   make clean 2>/dev/null || true
   make distclean 2>/dev/null || true
   ./build.sh
+
   ./configure --prefix="${MODSEC_PREFIX}" \
               --with-maxmind \
               --with-libxml \
