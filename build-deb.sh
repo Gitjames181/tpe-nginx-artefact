@@ -8,6 +8,7 @@ REPO_ROOT="${SCRIPT_DIR}"
 BUILD_DIR="/tmp/nginx-deb-build"
 CONTAINER_NAME="${CONTAINER_NAME:-nginx-builder}"
 PKG_VERSION="1.0.0"
+DEB_ARCH="${DEB_ARCH:-amd64}"
 
 copy_from_container() {
     local source_path="$1"
@@ -104,6 +105,8 @@ cp "${REPO_ROOT}/debian-pkg/DEBIAN/control" "${BUILD_DIR}/DEBIAN/"
 cp "${REPO_ROOT}/debian-pkg/DEBIAN/postinst" "${BUILD_DIR}/DEBIAN/"
 cp "${REPO_ROOT}/debian-pkg/DEBIAN/prerm" "${BUILD_DIR}/DEBIAN/"
 
+sed -i "s/^Architecture: .*/Architecture: ${DEB_ARCH}/" "${BUILD_DIR}/DEBIAN/control"
+
 # Make scripts executable
 chmod 755 "${BUILD_DIR}/DEBIAN/postinst"
 chmod 755 "${BUILD_DIR}/DEBIAN/prerm"
@@ -113,7 +116,8 @@ find "${BUILD_DIR}/DEBIAN" -type f -exec chmod 644 {} \;
 find "${BUILD_DIR}/DEBIAN" -name "postinst" -o -name "prerm" | xargs chmod 755
 
 echo "[*] Building .deb package..."
-fakeroot dpkg-deb --build "${BUILD_DIR}" "nginx-modsecurity-quic_${PKG_VERSION}_amd64.deb"
+DEB_FILE="nginx-modsecurity-quic_${PKG_VERSION}_${DEB_ARCH}.deb"
+fakeroot dpkg-deb --build "${BUILD_DIR}" "${DEB_FILE}"
 
-echo "[+] Package created: nginx-modsecurity-quic_${PKG_VERSION}_amd64.deb"
-ls -lh "nginx-modsecurity-quic_${PKG_VERSION}_amd64.deb"
+echo "[+] Package created: ${DEB_FILE}"
+ls -lh "${DEB_FILE}"

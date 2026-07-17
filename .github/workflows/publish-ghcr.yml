@@ -1,6 +1,15 @@
 name: Publish NGINX Debian Package
 on:
   workflow_dispatch:
+    inputs:
+      deb_arch:
+        description: Target Debian architecture for the package
+        required: false
+        default: amd64
+        type: choice
+        options:
+          - amd64
+          - arm64
   push:
     tags:
       - 'v*'
@@ -31,8 +40,10 @@ jobs:
           if [[ "$PKG_VERSION" == "$GITHUB_REF_NAME" && ! "$GITHUB_REF" == refs/tags/* ]]; then
             PKG_VERSION="0.0.0+dev.${GITHUB_RUN_NUMBER}"
           fi
-          DEB_NAME="tpe-nginx_${PKG_VERSION}_amd64.deb"
+          DEB_ARCH="${{ github.event.inputs.deb_arch || 'amd64' }}"
+          DEB_NAME="tpe-nginx_${PKG_VERSION}_${DEB_ARCH}.deb"
           echo "PKG_VERSION=${PKG_VERSION}" >> $GITHUB_ENV
+          echo "DEB_ARCH=${DEB_ARCH}" >> $GITHUB_ENV
           echo "DEB_NAME=${DEB_NAME}" >> $GITHUB_ENV
           echo "DEBFILE=${RUNNER_TEMP}/${DEB_NAME}" >> $GITHUB_ENV
           rm -rf "${RUNNER_TEMP}/pkgroot"
@@ -66,7 +77,7 @@ Package: tpe-nginx
 Version: PLACEHOLDER
 Section: web
 Priority: optional
-Architecture: amd64
+Architecture: PLACEHOLDER_ARCH
 Maintainer: James Wilson
 Depends: libc6, libyajl2, libxml2, libmaxminddb0, libpcre2-8-0, libfuzzy2, liblua5.3-0, libcurl3-gnutls | libcurl4, libjemalloc2, libgd3
 Description: TPE Hardened NGINX
@@ -75,6 +86,7 @@ Description: TPE Hardened NGINX
 EOF
           # Inject version after the heredoc so shell expansion works cleanly
           sed -i "s/^Version: PLACEHOLDER/Version: ${PKG_VERSION}/" "${PKGROOT}/DEBIAN/control"
+          sed -i "s/^Architecture: PLACEHOLDER_ARCH/Architecture: ${DEB_ARCH}/" "${PKGROOT}/DEBIAN/control"
 
       - name: Build Debian package
         run: |
