@@ -93,6 +93,17 @@ is_container_runtime() {
   return 1
 }
 
+# Returns true when running under QEMU user-mode emulation (e.g. arm64 container
+# on an x86_64 host). QEMU cannot reliably execute the SIMD/NEON compiler
+# intrinsics that GCC emits for zlib-ng, causing segfaults during compilation.
+# In this case we disable all SIMD optimisations for the compile step — the
+# resulting binary is plain C but runs correctly on real arm64 hardware.
+is_qemu_emulation() {
+  grep -qi "QEMU Virtual Machine\|qemu" /proc/cpuinfo 2>/dev/null && return 0
+  [[ -n "${QEMU_EMULATION:-}" ]] && return 0
+  return 1
+}
+
 require_root() {
   [[ $EUID -eq 0 ]] || die "Please run as root (sudo)."
 }
@@ -218,7 +229,18 @@ build_zlib_ng() {
   cd "${DEPS_DIR}/zlib-ng"
   rm -rf build libz.a 2>/dev/null || true
 
-  cmake -B build -DCMAKE_BUILD_TYPE=Release -DZLIB_COMPAT=ON -DBUILD_SHARED_LIBS=OFF -DZLIB_ENABLE_TESTS=OFF .
+  # Under QEMU emulation the compiler segfaults when it tries to emit and
+  # test NEON/SIMD intrinsics. Disable all SIMD/native-instruction paths so
+  # the build compiles as portable C. The package runs on real arm64 hardware.
+  local zlib_simd_flags=""
+  if is_qemu_emulation; then
+    msg "QEMU emulation detected — disabling SIMD optimisations for zlib-ng"
+    zlib_simd_flags="-DWITH_NEON=OFF -DWITH_ARMV8=OFF -DWITH_NATIVE_INSTRUCTIONS=OFF -DWITH_OPTIM=OFF"
+  fi
+
+  # shellcheck disable=SC2086
+  cmake -B build -DCMAKE_BUILD_TYPE=Release -DZLIB_COMPAT=ON -DBUILD_SHARED_LIBS=OFF \
+    -DZLIB_ENABLE_TESTS=OFF ${zlib_simd_flags} .
   cmake --build build --parallel "${jobs}"
 
   find build -name "libz*.a" -exec cp {} ./libz.a \;
@@ -441,11 +463,15 @@ configure_nginx() {
 
   msg "Patching NGINX Makefile for dependency handling..."
 
+  local zlib_simd_flags_inline=""
+  if is_qemu_emulation; then
+    zlib_simd_flags_inline="-DWITH_NEON=OFF -DWITH_ARMV8=OFF -DWITH_NATIVE_INSTRUCTIONS=OFF -DWITH_OPTIM=OFF"
+  fi
   sed -i '/cd .*zlib-ng/,/libz\.a$/c\
 	cd /root/nginx-build/deps/zlib-ng \\\
 	&& if [ ! -f libz.a ]; then \\\
 		make clean 2>/dev/null || true \\\
-		&& cmake -B build -DZLIB_COMPAT=ON -DBUILD_SHARED_LIBS=OFF . \\\
+		&& cmake -B build -DZLIB_COMPAT=ON -DBUILD_SHARED_LIBS=OFF '"${zlib_simd_flags_inline}"' . \\\
 		&& cmake --build build --target zlibstatic \\\
 		&& cp build/libz.a . ; \\\
 	fi' objs/Makefile
