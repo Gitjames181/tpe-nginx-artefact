@@ -4,11 +4,27 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${SCRIPT_DIR}"
 
-# Prepare debian package structure
 BUILD_DIR="/tmp/nginx-deb-build"
 CONTAINER_NAME="${CONTAINER_NAME:-nginx-builder}"
 PKG_VERSION="1.0.0"
-DEB_ARCH="${DEB_ARCH:-amd64}"
+
+# Accept arch as first argument, or prompt interactively
+if [[ $# -ge 1 ]]; then
+    DEB_ARCH="$1"
+else
+    echo "Select target architecture:"
+    select DEB_ARCH in amd64 arm64; do
+        [[ -n "${DEB_ARCH}" ]] && break
+        echo "Invalid selection. Enter 1 (amd64) or 2 (arm64)."
+    done
+fi
+
+case "${DEB_ARCH}" in
+    amd64|arm64) ;;
+    *) echo "[!] Unsupported architecture '${DEB_ARCH}'. Use amd64 or arm64."; exit 1 ;;
+esac
+
+echo "[*] Building for architecture: ${DEB_ARCH}"
 
 copy_from_container() {
     local source_path="$1"
@@ -117,7 +133,8 @@ find "${BUILD_DIR}/DEBIAN" -name "postinst" -o -name "prerm" | xargs chmod 755
 
 echo "[*] Building .deb package..."
 DEB_FILE="nginx-modsecurity-quic_${PKG_VERSION}_${DEB_ARCH}.deb"
-fakeroot dpkg-deb --build "${BUILD_DIR}" "${DEB_FILE}"
+DEB_OUT="${REPO_ROOT}/${DEB_FILE}"
+fakeroot dpkg-deb --build "${BUILD_DIR}" "${DEB_OUT}"
 
-echo "[+] Package created: ${DEB_FILE}"
-ls -lh "${DEB_FILE}"
+echo "[+] Package created: ${DEB_OUT}"
+ls -lh "${DEB_OUT}"

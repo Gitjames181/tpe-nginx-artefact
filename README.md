@@ -14,78 +14,65 @@ A hermetic, from-source NGINX build for Ubuntu/Debian with HTTP/3 (QUIC), ModSec
 
 ## Building a `.deb` package
 
-Both targets use `DESTDIR` so the build installs into a staging root instead of the live system, making it safe to run anywhere without trashing the host.
+`build-deb.sh` extracts artifacts from the running Docker build container and produces a `.deb` directly in the repo root, named `nginx-modsecurity-quic_<version>_<arch>.deb`.
 
-### amd64
+### Quick start
 
+**Interactive (select menu):**
 ```bash
-PKGROOT=/tmp/amd64-pkgroot
-rm -rf "$PKGROOT" && mkdir -p "$PKGROOT"
-
-DESTDIR="$PKGROOT" sudo -E bash /path/to/nginx-production-tpe-v22.sh
-
-# Package it
-mkdir -p "${PKGROOT}/DEBIAN"
-install -m 0755 debian-pkg/DEBIAN/postinst "${PKGROOT}/DEBIAN/postinst"
-install -m 0755 debian-pkg/DEBIAN/prerm    "${PKGROOT}/DEBIAN/prerm"
-sed \
-  -e "s/^Version: .*/Version: 0.0.0+amd64.local/" \
-  -e "s/^Architecture: .*/Architecture: amd64/" \
-  debian-pkg/DEBIAN/control > "${PKGROOT}/DEBIAN/control"
-
-fakeroot dpkg-deb --build "$PKGROOT" \
-  tpe-nginx_0.0.0+amd64.local_amd64.deb
+./build-deb.sh
+# Select target architecture:
+# 1) amd64
+# 2) arm64
+# #? 1
 ```
 
-Install `fakeroot` and `dpkg-dev` first if needed: `sudo apt-get install -y fakeroot dpkg-dev`
+**Non-interactive (CI / scripted):**
+```bash
+./build-deb.sh amd64
+./build-deb.sh arm64
+```
 
-**Estimated time**: 15–30 min
+The script validates the arch value and rejects anything other than `amd64` or `arm64`.
 
----
+### Prerequisites
 
-### arm64 (via Docker QEMU emulation)
+1. The build container must be running before you invoke `build-deb.sh`:
+   ```bash
+   docker compose up --build nginx-builder
+   ```
+2. Install host packaging tools if not present:
+   ```bash
+   sudo apt-get install -y fakeroot dpkg-dev
+   ```
 
-Requires `binfmt_misc` support (standard on Ubuntu 20.04+ hosts with `qemu-user-static`):
+### Output
+
+The finished package lands in the repo root:
+```
+nginx-modsecurity-quic_1.0.0_amd64.deb
+nginx-modsecurity-quic_1.0.0_arm64.deb
+```
+
+### arm64 — QEMU emulation prerequisite
+
+To build a genuine arm64 binary on an x86_64 host, run the one-time QEMU setup before starting the container:
 
 ```bash
-# One-time QEMU setup (if not already done)
 docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
-
-PKGROOT=/tmp/arm64-pkgroot
-rm -rf "$PKGROOT" && mkdir -p "$PKGROOT"
-
-docker run --rm \
-  --platform linux/arm64 \
-  -v "$(pwd):/build" \
-  -v "${PKGROOT}:/pkgroot" \
-  -w /build \
-  -e DESTDIR=/pkgroot \
-  ubuntu:24.04 \
-  bash nginx-production-tpe-v22.sh
-
-# Fix ownership (Docker writes as root)
-sudo chown -R "$(id -u):$(id -g)" "$PKGROOT"
-
-# Package it
-mkdir -p "${PKGROOT}/DEBIAN"
-install -m 0755 debian-pkg/DEBIAN/postinst "${PKGROOT}/DEBIAN/postinst"
-install -m 0755 debian-pkg/DEBIAN/prerm    "${PKGROOT}/DEBIAN/prerm"
-sed \
-  -e "s/^Version: .*/Version: 0.0.0+arm64.local/" \
-  -e "s/^Architecture: .*/Architecture: arm64/" \
-  debian-pkg/DEBIAN/control > "${PKGROOT}/DEBIAN/control"
-
-fakeroot dpkg-deb --build "$PKGROOT" \
-  tpe-nginx_0.0.0+arm64.local_arm64.deb
 ```
 
-**Estimated time**: 30–60 min under QEMU emulation
+Then start the container with `--platform linux/arm64` and run `build-deb.sh arm64`.
 
----
+### Environment variables
+
+| Variable          | Default         | Description                                     |
+|-------------------|-----------------|-------------------------------------------------|
+| `CONTAINER_NAME`  | `nginx-builder` | Name of the running Docker build container      |
 
 ### Versioning
 
-Replace `0.0.0+arm64.local` / `0.0.0+amd64.local` with any semver string, e.g. `1.28.0+20260717_amd64`.
+`PKG_VERSION` is set at the top of `build-deb.sh`. Update it before cutting a release, e.g. `1.28.0`.
 
 ---
 
