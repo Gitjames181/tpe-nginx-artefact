@@ -198,28 +198,61 @@ EOF
 
 clone_or_update() {
   local repo="$1" dir="$2" ref="${3:-}"
+  # Shallow clones (--depth 1) keep download size small and avoid long stalls
+  # over slow or emulated network paths. GIT_HTTP_LOW_SPEED_* aborts transfers
+  # that drop below 1 KB/s for more than 60 seconds so a stall fails fast.
+  local git_env=(
+    GIT_HTTP_LOW_SPEED_LIMIT=1024
+    GIT_HTTP_LOW_SPEED_TIME=60
+  )
   if [[ -d "${dir}/.git" ]]; then
-    ( cd "${dir}" && git fetch -q && { [[ -n "$ref" ]] && git checkout -q "$ref" || true; } && git pull -q || true ) || true
+    ( cd "${dir}" && env "${git_env[@]}" git fetch --depth=1 -q && \
+      { [[ -n "$ref" ]] && git checkout -q "$ref" || true; } && \
+      env "${git_env[@]}" git pull -q || true ) || true
   else
-    [[ -n "$ref" ]] && git clone -q --branch "$ref" "$repo" "$dir" || git clone -q "$repo" "$dir"
+    if [[ -n "$ref" ]]; then
+      env "${git_env[@]}" git clone -q --depth=1 --branch "$ref" "$repo" "$dir"
+    else
+      env "${git_env[@]}" git clone -q --depth=1 "$repo" "$dir"
+    fi
   fi
 }
 
 download_source_code() {
   msg "Downloading all required source code..."
   cd "${SRC_DIR}"
-  wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+  wget -q --timeout=120 --tries=3 \
+    "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
   tar -zxf "nginx-${NGINX_VERSION}.tar.gz"
 
   cd "${DEPS_DIR}"
+  msg "Cloning OpenSSL QUIC..."
   clone_or_update "${OPENSSL_QUIC_REPO}" "${DEPS_DIR}/openssl-quic" "${OPENSSL_QUIC_BRANCH}"
+
+  msg "Cloning zlib-ng..."
   clone_or_update "https://github.com/zlib-ng/zlib-ng.git" "${DEPS_DIR}/zlib-ng"
+
+  msg "Cloning ModSecurity..."
   clone_or_update "https://github.com/owasp-modsecurity/ModSecurity.git" "${DEPS_DIR}/ModSecurity"
-  (cd "${DEPS_DIR}/ModSecurity" && git submodule update --init --recursive -q)
+  msg "Initialising ModSecurity submodules..."
+  ( cd "${DEPS_DIR}/ModSecurity" && \
+    GIT_HTTP_LOW_SPEED_LIMIT=1024 GIT_HTTP_LOW_SPEED_TIME=60 \
+    git submodule update --init --recursive --depth=1 -q )
+
+  msg "Cloning ModSecurity-nginx connector..."
   clone_or_update "https://github.com/SpiderLabs/ModSecurity-nginx.git" "${DEPS_DIR}/ModSecurity-nginx"
+
+  msg "Cloning headers-more-nginx-module..."
   clone_or_update "https://github.com/openresty/headers-more-nginx-module.git" "${DEPS_DIR}/headers-more-nginx-module"
+
+  msg "Cloning ngx_brotli..."
   clone_or_update "https://github.com/google/ngx_brotli.git" "${DEPS_DIR}/ngx_brotli"
-  (cd "${DEPS_DIR}/ngx_brotli" && git submodule update --init --recursive -q)
+  msg "Initialising ngx_brotli submodules..."
+  ( cd "${DEPS_DIR}/ngx_brotli" && \
+    GIT_HTTP_LOW_SPEED_LIMIT=1024 GIT_HTTP_LOW_SPEED_TIME=60 \
+    git submodule update --init --recursive --depth=1 -q )
+
+  msg "All source code downloaded."
 }
 
 build_zlib_ng() {
