@@ -162,13 +162,19 @@ ensure_dirs() {
 
 install_system_deps() {
   msg "Installing core system dependencies..."
-  command -v apt-get >/dev/null 2>&1 || die "apt-get is required on this host."
-  apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    build-essential git curl wget autoconf automake libtool pkg-config \
-    libyajl-dev libmaxminddb-dev doxygen ca-certificates perl autoconf-archive \
-    libpcre2-dev libfuzzy-dev liblua5.3-dev libcurl4-gnutls-dev libxml2-dev \
-    libjemalloc-dev libgd-dev cmake
+
+  # When running inside the build container all packages are already in the
+  # image — skip apt-get to avoid arch conflicts (the Dockerfile installs :arm64
+  # variants which declare Conflicts against the plain amd64 names).
+  if ! is_container_runtime; then
+    command -v apt-get >/dev/null 2>&1 || die "apt-get is required on this host."
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      build-essential git curl wget autoconf automake libtool pkg-config \
+      libyajl-dev libmaxminddb-dev doxygen ca-certificates perl autoconf-archive \
+      libpcre2-dev libfuzzy-dev liblua5.3-dev libcurl4-gnutls-dev libxml2-dev \
+      libjemalloc-dev libgd-dev cmake
+  fi
 
   # Ubuntu/Debian provide libfuzzy, but ModSecurity's ssdeep probe expects
   # a pkg-config entry named ssdeep. Write a compatibility .pc if needed.
