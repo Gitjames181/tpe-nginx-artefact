@@ -2,9 +2,33 @@ FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Register arm64 as a foreign architecture so arm64 dev libraries
-# can be installed alongside amd64 for cross-compilation.
-RUN dpkg --add-architecture arm64
+# Ubuntu's archive.ubuntu.com only serves amd64/i386.
+# arm64 packages live on ports.ubuntu.com.
+# We rewrite the apt sources so each repo is pinned to its correct arch.
+RUN dpkg --add-architecture arm64 && \
+    truncate -s 0 /etc/apt/sources.list 2>/dev/null || true && \
+    printf '\
+Types: deb\n\
+URIs: http://archive.ubuntu.com/ubuntu\n\
+Suites: noble noble-updates noble-backports\n\
+Components: main restricted universe multiverse\n\
+Architectures: amd64\n\
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n\
+\n\
+Types: deb\n\
+URIs: http://security.ubuntu.com/ubuntu\n\
+Suites: noble-security\n\
+Components: main restricted universe multiverse\n\
+Architectures: amd64\n\
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n\
+\n\
+Types: deb\n\
+URIs: http://ports.ubuntu.com/ubuntu-ports\n\
+Suites: noble noble-updates noble-backports noble-security\n\
+Components: main restricted universe multiverse\n\
+Architectures: arm64\n\
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' \
+    > /etc/apt/sources.list.d/ubuntu.sources
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
