@@ -549,7 +549,7 @@ configure_nginx() {
   # `./config` which auto-detects the host (x86_64) and injects -m64.
   # Patch it to use `./Configure linux-aarch64` with CROSS_COMPILE set.
   if is_cross_build; then
-    sed -i 's|&& \./config |&& CROSS_COMPILE=aarch64-linux-gnu- ./Configure linux-aarch64 |g' objs/Makefile
+    sed -i 's|\./config |CROSS_COMPILE=aarch64-linux-gnu- ./Configure linux-aarch64 |g' objs/Makefile
   fi
 }
 
