@@ -4,7 +4,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Ubuntu's archive.ubuntu.com only serves amd64/i386.
 # arm64 packages live on ports.ubuntu.com.
-# We rewrite the apt sources so each repo is pinned to its correct arch.
+# Pin each repo to its correct arch so multiarch installs resolve cleanly.
 RUN dpkg --add-architecture arm64 && \
     truncate -s 0 /etc/apt/sources.list 2>/dev/null || true && \
     printf '\
@@ -30,6 +30,11 @@ Architectures: arm64\n\
 Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' \
     > /etc/apt/sources.list.d/ubuntu.sources
 
+# Native (amd64) build tools — these run on the host at build time.
+# arm64 dev libraries — the cross-compiler links the output against these.
+# We do NOT install amd64 versions of the same dev libs: several (libjemalloc-dev,
+# libgd-dev, etc.) declare Conflicts between arch variants and cannot coexist.
+# All source code is compiled from scratch, so no amd64 dev headers are needed.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     gcc-aarch64-linux-gnu \
@@ -47,15 +52,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     perl \
     autoconf-archive \
     cmake \
-    libyajl-dev \
-    libmaxminddb-dev \
-    libpcre2-dev \
-    libfuzzy-dev \
-    liblua5.3-dev \
-    libcurl4-gnutls-dev \
-    libxml2-dev \
-    libjemalloc-dev \
-    libgd-dev \
     libyajl-dev:arm64 \
     libmaxminddb-dev:arm64 \
     libpcre2-dev:arm64 \
