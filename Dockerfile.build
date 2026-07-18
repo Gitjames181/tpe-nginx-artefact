@@ -2,8 +2,15 @@ FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Register arm64 as a foreign architecture so arm64 dev libraries
+# can be installed alongside amd64 for cross-compilation.
+RUN dpkg --add-architecture arm64
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    gcc-aarch64-linux-gnu \
+    g++-aarch64-linux-gnu \
+    binutils-aarch64-linux-gnu \
     git \
     curl \
     wget \
@@ -11,12 +18,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     automake \
     libtool \
     pkg-config \
-    libyajl-dev \
-    libmaxminddb-dev \
     doxygen \
     ca-certificates \
     perl \
     autoconf-archive \
+    cmake \
+    libyajl-dev \
+    libmaxminddb-dev \
     libpcre2-dev \
     libfuzzy-dev \
     liblua5.3-dev \
@@ -24,10 +32,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxml2-dev \
     libjemalloc-dev \
     libgd-dev \
-    cmake \
+    libyajl-dev:arm64 \
+    libmaxminddb-dev:arm64 \
+    libpcre2-dev:arm64 \
+    libfuzzy-dev:arm64 \
+    liblua5.3-dev:arm64 \
+    libcurl4-gnutls-dev:arm64 \
+    libxml2-dev:arm64 \
+    libjemalloc-dev:arm64 \
+    libgd-dev:arm64 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /root
 
-# Script will be mounted at runtime
 CMD ["bash", "/root/build.sh"]

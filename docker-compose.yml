@@ -1,19 +1,17 @@
-version: '3.8'
-
 services:
   nginx-builder:
     build:
       context: .
       dockerfile: Dockerfile.build
-    # Uncomment the line below to build for arm64 (requires QEMU: docker run --rm --privileged multiarch/qemu-user-static --reset -p yes)
-    platform: linux/arm64
     container_name: nginx-builder
     environment:
-      - BUILD_JOBS=1
+      - BUILD_JOBS=4
       - CONTAINER_TEST=1
-      - QEMU_EMULATION=1
+      # Set to arm64 to cross-compile for arm64 (native amd64 container, no QEMU)
+      # Leave unset or set to amd64 to build for amd64
+      - CROSS_COMPILE_ARCH=arm64
     mem_limit: 8g
-    cpus: 1.0
+    cpus: 4.0
     volumes:
       - ./nginx-production-tpe-v22.sh:/root/build.sh:ro
       - build-output:/root/nginx-build

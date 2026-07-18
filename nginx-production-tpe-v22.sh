@@ -29,9 +29,18 @@ MODSEC_PREFIX="${BASE}/modsec-build"
 # On-target paths (written into the binary as rpath / config includes).
 MODSEC_INSTALL_PATH="${MODSEC_INSTALL_PATH:-/usr/local/modsecurity}"
 CRS_INSTALL_PATH="${CRS_INSTALL_PATH:-/etc/nginx/owasp-crs}"
-OPENSSL_TARGET="${OPENSSL_TARGET:-$(case "$(uname -m)" in
-  aarch64|arm64) echo linux-aarch64 ;;
-  x86_64|amd64) echo linux-x86_64 ;;
+# CROSS_COMPILE_ARCH can be set to arm64 or amd64.
+# When unset, defaults to the native machine arch.
+CROSS_COMPILE_ARCH="${CROSS_COMPILE_ARCH:-}"
+if [[ -z "${CROSS_COMPILE_ARCH}" ]]; then
+  case "$(uname -m)" in
+    aarch64|arm64) CROSS_COMPILE_ARCH="arm64" ;;
+    *) CROSS_COMPILE_ARCH="amd64" ;;
+  esac
+fi
+
+OPENSSL_TARGET="${OPENSSL_TARGET:-$(case "${CROSS_COMPILE_ARCH}" in
+  arm64) echo linux-aarch64 ;;
   *) echo linux-x86_64 ;;
 esac)}"
 
@@ -69,15 +78,26 @@ pkgpath() {
 }
 
 # ---------- Toolchain Flags ----------
-export CC="gcc"
-# Under QEMU user-mode emulation GCC's optimiser segfaults on heavy
-# translation units (OpenSSL, ModSecurity) even at -O1. -O0 is the only
-# fully reliable level; binaries run at full speed on real arm64 hardware.
-if grep -qi "QEMU Virtual Machine\|qemu" /proc/cpuinfo 2>/dev/null || [[ -n "${QEMU_EMULATION:-}" ]]; then
-  export CFLAGS="-O0 -fstack-protector-strong -Wformat -Werror=format-security -D_FORTIFY_SOURCE=2"
+# When CROSS_COMPILE_ARCH=arm64 and the host is amd64 we use the
+# aarch64-linux-gnu cross-compiler. GCC runs natively — no QEMU involved.
+if [[ "${CROSS_COMPILE_ARCH}" == "arm64" ]] && [[ "$(uname -m)" != "aarch64" ]]; then
+  export CROSS_TRIPLE="aarch64-linux-gnu"
+  export CC="${CROSS_TRIPLE}-gcc"
+  export CXX="${CROSS_TRIPLE}-g++"
+  export AR="${CROSS_TRIPLE}-ar"
+  export RANLIB="${CROSS_TRIPLE}-ranlib"
+  export STRIP="${CROSS_TRIPLE}-strip"
+  export PKG_CONFIG_PATH="/usr/lib/aarch64-linux-gnu/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+  export PKG_CONFIG_LIBDIR="/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
+  export PKG_CONFIG_SYSROOT_DIR="/"
+  CROSS_BUILD=1
 else
-  export CFLAGS="-O2 -fstack-protector-strong -Wformat -Werror=format-security -D_FORTIFY_SOURCE=2"
+  export CROSS_TRIPLE=""
+  export CC="gcc"
+  export CXX="g++"
+  CROSS_BUILD=0
 fi
+export CFLAGS="-O2 -fstack-protector-strong -Wformat -Werror=format-security -D_FORTIFY_SOURCE=2"
 
 # ---------- Helpers ----------
 msg()  { echo -e "\e[1;32m==>\e[0m $*"; }
@@ -100,15 +120,8 @@ is_container_runtime() {
   return 1
 }
 
-# Returns true when running under QEMU user-mode emulation (e.g. arm64 container
-# on an x86_64 host). QEMU cannot reliably execute the SIMD/NEON compiler
-# intrinsics that GCC emits for zlib-ng, causing segfaults during compilation.
-# In this case we disable all SIMD optimisations for the compile step — the
-# resulting binary is plain C but runs correctly on real arm64 hardware.
-is_qemu_emulation() {
-  grep -qi "QEMU Virtual Machine\|qemu" /proc/cpuinfo 2>/dev/null && return 0
-  [[ -n "${QEMU_EMULATION:-}" ]] && return 0
-  return 1
+is_cross_build() {
+  [[ "${CROSS_BUILD:-0}" == "1" ]]
 }
 
 require_root() {
@@ -164,14 +177,16 @@ install_system_deps() {
   [[ -f /usr/include/fuzzy.h ]] || die "libfuzzy-dev did not install fuzzy.h"
 
   local fuzzy_so libdir pcdir
-  # find is reliable across multiarch layouts; dpkg/ldconfig queries are fragile in Docker
-  fuzzy_so="$(find /usr/lib -name 'libfuzzy.so*' -not -type d 2>/dev/null | sort | head -1)"
+  # For cross-builds we need the arm64 libfuzzy; for native builds the host one.
+  if is_cross_build; then
+    fuzzy_so="$(find /usr/lib/aarch64-linux-gnu -name 'libfuzzy.so*' -not -type d 2>/dev/null | sort | head -1)"
+  else
+    fuzzy_so="$(find /usr/lib -name 'libfuzzy.so*' -not -type d 2>/dev/null | sort | head -1)"
+  fi
   if [[ -n "$fuzzy_so" ]]; then
     libdir="$(dirname "$fuzzy_so")"
   else
-    local multiarch
-    multiarch="$(gcc -print-multiarch 2>/dev/null || true)"
-    libdir="${multiarch:+/usr/lib/${multiarch}}"
+    libdir="${CROSS_TRIPLE:+/usr/lib/${CROSS_TRIPLE}}"
     libdir="${libdir:-/usr/lib}"
   fi
   pcdir="${libdir}/pkgconfig"
@@ -269,20 +284,14 @@ build_zlib_ng() {
   cd "${DEPS_DIR}/zlib-ng"
   rm -rf build libz.a 2>/dev/null || true
 
-  # Under QEMU emulation the compiler segfaults when it tries to emit and
-  # test NEON/SIMD intrinsics. Disable all SIMD/native-instruction paths so
-  # the build compiles as portable C. The package runs on real arm64 hardware.
-  local zlib_simd_flags=""
-  if is_qemu_emulation; then
-    msg "QEMU emulation detected — disabling SIMD optimisations for zlib-ng"
-    zlib_simd_flags="-DWITH_NEON=OFF -DWITH_ARMV8=OFF -DWITH_NATIVE_INSTRUCTIONS=OFF -DWITH_OPTIM=OFF"
+  local cross_flags=""
+  if is_cross_build; then
+    cross_flags="-DCMAKE_C_COMPILER=${CC} -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64"
   fi
 
   # shellcheck disable=SC2086
   cmake -B build -DCMAKE_BUILD_TYPE=Release -DZLIB_COMPAT=ON -DBUILD_SHARED_LIBS=OFF \
-    -DZLIB_ENABLE_TESTS=OFF -DINSTALL_UTILS=OFF ${zlib_simd_flags} .
-  # Build only the static library target — utility programs (minigzip etc.)
-  # are not needed and crash under QEMU emulation.
+    -DZLIB_ENABLE_TESTS=OFF -DINSTALL_UTILS=OFF ${cross_flags} .
   cmake --build build --parallel "${jobs}" --target zlib-ng
 
   find build -name "libz*.a" -exec cp {} ./libz.a \;
@@ -351,7 +360,13 @@ build_modsecurity() {
   make distclean 2>/dev/null || true
   ./build.sh
 
+  local host_flag=""
+  if is_cross_build; then
+    host_flag="--host=${CROSS_TRIPLE}"
+  fi
+
   ./configure --prefix="${MODSEC_PREFIX}" \
+              ${host_flag} \
               --with-maxmind \
               --with-libxml \
               --with-ssdeep \
@@ -466,6 +481,12 @@ configure_nginx() {
   local LDLIBS="-lmodsecurity -ljemalloc -Wl,-rpath,${MODSEC_INSTALL_PATH}/lib"
   local SECURITY_FLAGS="-Wl,-z,relro -Wl,-z,now -pie"
 
+  local cross_opts=()
+  if is_cross_build; then
+    cross_opts+=(--crossbuild=Linux:aarch64)
+    cross_opts+=(--with-cc="${CC}")
+  fi
+
   ./configure \
     --prefix="${OUT_PREFIX}" \
     --conf-path="${CONF_PATH}" \
@@ -498,6 +519,7 @@ configure_nginx() {
     --with-http_stub_status_module \
     --add-dynamic-module="${DEPS_DIR}/ngx_brotli" \
     --with-compat \
+    "${cross_opts[@]}" \
     --with-cc-opt="${CFLAGS} -I${MODSEC_INC_DIR}" \
     --with-ld-opt="${LDFLAGS} ${LDLIBS} ${SECURITY_FLAGS}"
 
@@ -505,23 +527,17 @@ configure_nginx() {
 
   msg "Patching NGINX Makefile for dependency handling..."
 
-  local zlib_simd_flags_inline=""
-  if is_qemu_emulation; then
-    zlib_simd_flags_inline="-DWITH_NEON=OFF -DWITH_ARMV8=OFF -DWITH_NATIVE_INSTRUCTIONS=OFF -DWITH_OPTIM=OFF"
-  fi
   sed -i '/cd .*zlib-ng/,/libz\.a$/c\
 	cd /root/nginx-build/deps/zlib-ng \\\
 	&& if [ ! -f libz.a ]; then \\\
 		make clean 2>/dev/null || true \\\
-		&& cmake -B build -DZLIB_COMPAT=ON -DBUILD_SHARED_LIBS=OFF '"${zlib_simd_flags_inline}"' . \\\
+		&& cmake -B build -DZLIB_COMPAT=ON -DBUILD_SHARED_LIBS=OFF . \\\
 		&& cmake --build build --target zlibstatic \\\
 		&& cp build/libz.a . ; \\\
 	fi' objs/Makefile
 
   sed -i 's/make distclean/make clean || true/g' objs/Makefile
-  local opt_flag="-O2"
-  if is_qemu_emulation; then opt_flag="-O0"; fi
-  sed -i "s/CFLAGS=\"\"/CFLAGS=\"${opt_flag}\"/g" objs/Makefile
+  sed -i "s/CFLAGS=\"\"/CFLAGS=\"-O2\"/g" objs/Makefile
 }
 
 compile_and_install_nginx() {
@@ -614,10 +630,13 @@ CONF
 }
 
 smoke_test() {
-  # FIX: a package build stages files under $DESTDIR — there is nothing
-  # runnable on the GitHub runner itself, so never try to start nginx here.
   if [[ -n "${DESTDIR}" ]]; then
     msg "Package build detected. Skipping smoke test."
+    return 0
+  fi
+
+  if is_cross_build; then
+    msg "Cross-compiled binary — skipping smoke test (binary runs on ${CROSS_COMPILE_ARCH}, not $(uname -m))."
     return 0
   fi
 

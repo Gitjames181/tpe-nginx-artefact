@@ -53,7 +53,7 @@ docker info
 The build is two distinct steps. They must be run in order.
 
 ```
-Step 1 — docker compose up    →  compiles everything inside a container (~15–60 min)
+Step 1 — docker compose up    →  compiles everything inside a container (~15–30 min)
 Step 2 — ./build-deb.sh       →  extracts artefacts and produces the .deb (< 1 min)
 ```
 
@@ -63,50 +63,44 @@ Step 1 leaves all compiled output inside a Docker named volume attached to the c
 
 ## Step 1 — Compile (Docker)
 
+The build container always runs **native amd64**. arm64 output is produced by the `aarch64-linux-gnu` cross-compiler (installed inside the container) — no QEMU emulation is involved during compilation.
+
 ### amd64 (default)
 
-No changes needed. Run:
-
-```bash
-docker compose up --build nginx-builder
-```
-
-Expected duration: **15–30 minutes** on a modern x86_64 host.
-
----
-
-### arm64 (cross-compile via QEMU emulation)
-
-arm64 binaries are built by running an arm64 container under QEMU emulation on your x86_64 host. This is handled entirely by Docker — no cross-compiler toolchain is required.
-
-**One-time QEMU setup** (registers ARM64 ELF handlers in the kernel — survives until next reboot, safe to re-run):
-
-```bash
-docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
-```
-
-**Edit `docker-compose.yml`** — uncomment the platform line:
-
+Edit `docker-compose.yml` and set:
 ```yaml
-# platform: linux/arm64   ← uncomment this line
+- CROSS_COMPILE_ARCH=amd64
 ```
 
 Then run:
-
 ```bash
 docker compose up --build nginx-builder
 ```
 
-Expected duration: **30–60 minutes** under QEMU emulation.
+Expected duration: **15–30 minutes**.
 
-**To undo the QEMU registration** (without rebooting):
-```bash
-docker run --rm --privileged multiarch/qemu-user-static --reset
+---
+
+### arm64 (cross-compile, no QEMU required)
+
+Edit `docker-compose.yml` and set:
+```yaml
+- CROSS_COMPILE_ARCH=arm64
 ```
 
-> **Switching between architectures:** Comment the `platform:` line back in (or remove it) to return to amd64 builds. The Docker named volume `build-output` holds the last build's artefacts — if you switch arch, remove the old volume first so you are not packaging stale amd64 files into an arm64 package:
+Then run:
+```bash
+docker compose up --build nginx-builder
+```
+
+Expected duration: **15–30 minutes** — same as amd64 because GCC runs natively on the x86_64 host and emits arm64 ELF. No emulation overhead.
+
+> **No QEMU setup required.** Cross-compilation uses the `gcc-aarch64-linux-gnu` toolchain bundled in the build container. The host kernel, Docker, and your workstation require no changes.
+
+> **Switching between architectures:** Remove the old volume before switching so stale artefacts are not packaged:
 > ```bash
 > docker compose down -v
+> # edit CROSS_COMPILE_ARCH in docker-compose.yml
 > docker compose up --build nginx-builder
 > ```
 
@@ -245,13 +239,18 @@ Step 1 has not been run, or the container was removed. Run `docker compose up --
 **Container status is not `exited`**
 The build is still running. Wait for it to complete before running `build-deb.sh`. Check progress with `docker logs -f nginx-builder`.
 
+**`aarch64-linux-gnu-gcc: command not found`**
+The cross-compiler is installed inside the build container — you should not see this unless the container image did not rebuild. Run `docker compose up --build nginx-builder` (the `--build` flag forces a fresh image build).
+
 **`Please run as root`**
 Only relevant for native (non-Docker) builds. Docker containers run as root by default.
 
 **Switching from amd64 to arm64 (or vice versa) produces wrong binary**
-The Docker named volume `build-output` caches the previous build. Remove it before switching arch:
+The Docker named volume `build-output` caches the previous build. Remove it before switching arch, then change `CROSS_COMPILE_ARCH` in `docker-compose.yml`:
 ```bash
 docker compose down -v
+# edit docker-compose.yml: CROSS_COMPILE_ARCH=arm64 (or amd64)
+docker compose up --build nginx-builder
 ```
 
 ---
