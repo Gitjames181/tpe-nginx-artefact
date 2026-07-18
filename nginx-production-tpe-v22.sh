@@ -544,6 +544,13 @@ configure_nginx() {
 
   sed -i 's/make distclean/make clean || true/g' objs/Makefile
   sed -i "s/CFLAGS=\"\"/CFLAGS=\"-O2\"/g" objs/Makefile
+
+  # When cross-compiling, nginx's embedded OpenSSL Makefile rule runs
+  # `./config` which auto-detects the host (x86_64) and injects -m64.
+  # Patch it to use `./Configure linux-aarch64` with CROSS_COMPILE set.
+  if is_cross_build; then
+    sed -i 's|&& \./config |&& CROSS_COMPILE=aarch64-linux-gnu- ./Configure linux-aarch64 |g' objs/Makefile
+  fi
 }
 
 compile_and_install_nginx() {
